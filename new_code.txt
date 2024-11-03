@@ -1,0 +1,156 @@
+from natasha import Doc, Segmenter, NewsMorphTagger, NewsEmbedding
+from sklearn.metrics.pairwise import cosine_similarity
+from nltk.corpus import stopwords
+import nltk
+import numpy as np
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+
+# Инициализация компонентов Natasha
+nltk.download("punkt")
+nltk.download("stopwords")
+
+# Русские стоп-слова
+stop_words = stopwords.words("russian")
+embedding = NewsEmbedding()
+segmenter = Segmenter()
+morph_tagger = NewsMorphTagger(embedding)
+
+# Этапы разговора
+TEXT, COMPRESSION_LEVEL = range(2)
+
+
+# Лемматизация текста с Natasha
+def lemmatize_text(text):
+    doc = Doc(text)
+    doc.segment(segmenter)
+    doc.tag_morph(morph_tagger)
+
+    lemmatized_words = []
+    for token in doc.tokens:
+        if token.pos != 'PUNCT' and token.lemma:
+            lemmatized_words.append(token.lemma)  # Используем уже лемматизированное слово
+    return " ".join(lemmatized_words)
+
+
+# Функция для суммаризации текста
+def summarize_text(text, compression_level="strong"):
+    sentences = nltk.sent_tokenize(text, language="russian")
+    lemmatized_sentences = [lemmatize_text(sentence) for sentence in sentences]
+
+    if len(sentences) <= 2:
+        return text
+
+    # Создание векторов для предложений
+    embeddings = []
+    for sentence in lemmatized_sentences:
+        if sentence:
+            doc = Doc(sentence)
+            doc.segment(segmenter)
+            vectors = np.array([token.vector for token in doc.tokens if token.vector is not None])
+            if vectors.size:
+                embeddings.append(np.mean(vectors, axis=0))
+            else:
+                embeddings.append(np.zeros(300))  # Вектор нулевой длины, если векторы отсутствуют
+        else:
+            embeddings.append(np.zeros(300))
+
+    embeddings = np.array(embeddings)
+
+    # Косинусное сходство
+    cosine_sim = cosine_similarity(embeddings)
+    scores = cosine_sim.sum(axis=1)
+
+    # Дополнительная обработка предложений
+    threshold = np.mean(scores)  # Используем среднее значение для фильтрации
+    selected_sentences = [sentences[i] for i in range(len(sentences)) if scores[i] >= threshold]
+
+    # Выбор количества предложений для вывода
+    num_sentences = 2 if compression_level == "strong" else min(4, len(selected_sentences))
+    ranked_sentences = [selected_sentences[i] for i in np.argsort(scores)[-num_sentences:]]
+
+    return " ".join(ranked_sentences)
+
+
+# Начало разговора
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Привет! Пожалуйста, введите текст для суммаризации."
+    )
+    return TEXT
+
+
+# Получение текста
+async def get_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['text'] = update.message.text  # Сохраняем текст в user_data
+    await update.message.reply_text(
+        "Спасибо! Теперь выберите степень сжатия: напишите 'сильно' для сильного сжатия или 'слабо' для слабого."
+    )
+    return COMPRESSION_LEVEL
+
+
+# Получение уровня сжатия и суммаризация
+async def get_compression_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    compression_level = update.message.text.lower()
+
+    # Проверяем, правильно ли введён уровень сжатия
+    if compression_level == 'сильно':
+        level = "strong"
+    elif compression_level == 'слабо':
+        level = "weak"
+    else:
+        await update.message.reply_text("Пожалуйста, напишите 'сильно' или 'слабо' для выбора степени сжатия.")
+        return COMPRESSION_LEVEL
+
+    text = context.user_data['text']
+    summary = summarize_text(text, level)
+    await update.message.reply_text(f"Суммаризация:\n{summary}")
+    return ConversationHandler.END
+
+
+# Завершение разговора
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Общение отменено. Если хотите начать заново, напишите /start.")
+    return ConversationHandler.END
+
+
+def main():
+    app = ApplicationBuilder().token("7611506314:AAEuZmc-RG5nLAuMjfmZS0qdtPmLXE86fxo").build()
+
+    # Определение обработчика разговоров
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text)],
+            COMPRESSION_LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_compression_level)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
+    app.run_polling()
+
+
+if __name__ == '__main__':
+    main()
+
+
+def main():
+    app = ApplicationBuilder().token("7611506314:AAEuZmc-RG5nLAuMjfmZS0qdtPmLXE86fxo").build()
+
+    # Определение обработчика разговоров
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text)],
+            COMPRESSION_LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_compression_level)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
+    app.run_polling()
+
+
+if __name__ == '__main__':
+    main()
